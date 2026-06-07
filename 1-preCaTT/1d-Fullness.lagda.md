@@ -1,253 +1,359 @@
 # 1d-Fullness: Boundaries and Fullness
 
-This module defines the source/target boundary predicates for pasting contexts
-and the two boolean fullness tests used later in CaTT coherence formation.
+This module defines the **boundary** and **fullness** conditions for
+coherences in CaTT. These conditions control which coherences are valid terms.
 
-Intuitively:
-- `in-src-bdry` / `in-tgt-bdry` identify which variables lie on the source or
-  target boundary of a pasting context
-- `check-COMP` encodes the compositional ("COMP") dependency pattern
-- `check-INV` encodes the invertibility ("INV") dependency pattern
-- `is-full` is their disjunction
+A coherence `coh ps A u v σ` in CaTT is valid when the endpoints `u` and `v`
+are **full**: their variable dependencies match the boundaries of the pasting
+context `ps`. There are two flavors of fullness:
 
-The module also proves structural facts about dimensions and source boundaries,
-especially `src-bdry-i-has-dim`, which is used in the dimension/dependency
-lemmas upstream.
+- **Compositional fullness (COMP)**: the source endpoint `u` depends on
+  exactly the source-boundary variables, and the target endpoint `v` depends
+  on exactly the target-boundary variables.
+
+- **COMPCOH fullness**: both endpoints depend on every variable
+  in the context.
+
+**Boundaries** are defined at each dimension level `i`. The source boundary
+`SrcBdryI Γps x i` means that variable `x` lies on the source boundary at
+level `i`. The target boundary is defined analogously. The top-level wrappers
+`SrcBdry` and `TgtBdry` use the top dimension `k ∸ 1`, where `k` is the
+dimension index carried by the pasting-context witness `IsPsCtx Γ k`.
+
+The keep condition `TgtKeep d z i` records when an old variable `z` is not
+removed by a pasting extension `d` at level `i`: this happens either when the new
+cell lives at a different dimension, or when `z` is not the specific variable
+being extended.
+
+The coverage lemma `src-bdry-i-has-dim` ensures that for every valid dimension
+level `i ≤ k`, the source boundary actually contains a variable at that
+dimension, returning the dimension as a relational `HasDimVar` witness.
 
 ```agda
 module 1d-Fullness where
 
-open import Agda.Builtin.Equality
-import Agda.Builtin.Sigma as Sum
-import Relation.Binary.PropositionalEquality as Eq
-open Eq using (trans; sym; cong; subst)
-open import Data.Nat using (ℕ; zero; suc; z≤n; s≤s; _≤_; _<_; _<ᵇ_; _∸_; _⊔_)
-open import Data.Nat.Base using (_≡ᵇ_)
-open import Data.Nat.Properties
-  using
-    (_≤?_; ≤-refl; ≤-trans; ≤-antisym; n≤1+n; n<1+n; <⇒<ᵇ; m≤m⊔n; m≤n⊔m; m≤n⇒m⊔n≡n; m≥n⇒m⊔n≡m; ⊔-lub; ≰⇒≥)
-open import Data.Bool.Base using (Bool; true; false; T; _∧_; _∨_; if_then_else_; not; _xor_)
+import 1a-RawSyntax as Raw
+import 1b-Dependency as Dep
+import 1c-Pasting as Ps
+
+open Raw
+open Ps
+open Dep using (DepVarTm)
+
 open import Data.Empty using (⊥-elim)
-open import Relation.Nullary using (Dec; yes; no; ¬_)
-open import 0a-Logic using (_iff_)
-
-import 1a-preCaTT as Pre
-open import 1a-preCaTT
-open import 1b-Dep
-open import 1c-Pasting
+open import Data.Nat using (ℕ; suc; _<_; _≤_; _∸_; _⊔_; z≤n; s≤s) renaming (zero to zeroℕ)
+open import Data.Nat.Properties
+  using (_≤?_; ≤-refl; ≤-trans; ≤-antisym; ≰⇒≥; ≰⇒>; m≥n⇒m⊔n≡m; m≤n⇒m⊔n≡n)
+open import Data.Product using (_×_; _,_; Σ; proj₁; proj₂)
+open import Relation.Binary.PropositionalEquality using (_≡_; _≢_; refl; sym; trans; cong; subst)
+open import Relation.Nullary using (¬_; yes; no)
 ```
 
-## Boundary Definitions (Source and Target)
+## Universal Quantifier over Variables
 
-The source and target boundary predicates are defined by recursion on the
-pasting context. Each extension adds a new target `y` and a new cell `f`, and
-the clauses below say exactly when those variables belong to the relevant
-boundary at a chosen cutoff dimension.
+`AllVar Γ Q` asserts that a predicate `Q` holds for every variable of `Γ`. It
+is used to state the fullness conditions uniformly over the entire context.
 
 ```agda
-in-src-bdry-i : ∀ {Γ} → CtxPs Γ → Var Γ → ℕ → Bool
--- In the base object context, the unique variable is always in every source boundary.
-in-src-bdry-i ps-ob vz i = true
--- In an extension, `f` is in the source boundary precisely above the base dimension.
-in-src-bdry-i (ps-ext xps) vz i = d <ᵇ i
-  where d = dim-ty (varps-to-type xps)
--- Likewise for the new target variable `y`.
-in-src-bdry-i (ps-ext xps) (vs vz) i = d <ᵇ i
-  where d = dim-ty (varps-to-type xps)
--- Older variables are checked recursively in the previous pasting context.
-in-src-bdry-i (ps-ext xps) (vs (vs z)) i =
-  in-src-bdry-i (varps-to-ctxps xps) z i
+-- Universally quantified predicate over all variables of a context.
+AllVar : (Γ : RawCtx) → (RawVar Γ → Set₁) → Set₁
+AllVar Γ Q = ∀ (x : RawVar Γ) → Q x
+```
 
-in-tgt-bdry-i : ∀ {Γ} → CtxPs Γ → Var Γ → ℕ → Bool
--- Same base case as source boundary.
-in-tgt-bdry-i ps-ob vz i = true
--- In an extension, `f` is in the target boundary precisely above the base dimension.
-in-tgt-bdry-i (ps-ext xps) vz i = d <ᵇ i
-  where d = dim-ty (varps-to-type xps)
--- The new target `y` is on the target boundary at the cutoff dimension.
-in-tgt-bdry-i (ps-ext xps) (vs vz) i = (d <ᵇ i) ∨ (d ≡ᵇ i)
-  where d = dim-ty (varps-to-type xps)
--- Older variables are usually inherited, except for one "consumed" source/target pair.
-in-tgt-bdry-i (ps-ext xps) (vs (vs z)) i =
-  if (d ≡ᵇ i) ∧ (var-eq z (varps-to-var xps))
-  then false
-  else in-tgt-bdry-i (varps-to-ctxps xps) z i
-  where d = dim-ty (varps-to-type xps)
+## Proof-Relevant Source Boundary
 
-in-src-bdry : ∀ {Γ} → CtxPs Γ → Var Γ → Bool
-in-src-bdry {Γ} Γps x = in-src-bdry-i Γps x (dim-ctx Γ ∸ 1)
+`SrcBdryI Γps x i` is an inductive proof that variable `x` lies on the source
+boundary of pasting context `Γps` at dimension level `i`. The base case
+`src-ob` covers the unique object variable; `src-new-f` and `src-new-y` place
+the two freshest variables on the boundary when the extension dimension `n`
+falls strictly below `i`; `src-old` propagates boundary membership from the
+underlying pasting context through an extension.
 
-in-tgt-bdry : ∀ {Γ} → CtxPs Γ → Var Γ → Bool
-in-tgt-bdry {Γ} Γps x = in-tgt-bdry-i Γps x (dim-ctx Γ ∸ 1)
+```agda
+data SrcBdryI : ∀ {Γ : RawCtx} {k : ℕ} → IsPsCtx Γ k → RawVar Γ → ℕ → Set₁ where
 
+  -- The unique object variable is always on the source boundary.
+  src-ob : ∀ {i} → SrcBdryI isps-ob zero i
+
+  -- In an extension, the newest edge lies on the source boundary when the
+  -- extension dimension is strictly below the boundary level.
+  src-new-f : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {i} →
+    n < i → SrcBdryI (isps-ext d hext) zero i
+
+  -- The newest target also lies on the source boundary under the same
+  -- dimension condition.
+  src-new-y : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {i} →
+    n < i → SrcBdryI (isps-ext d hext) (succ zero) i
+
+  -- Older source-boundary variables are preserved under extension.
+  src-old : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {z i} →
+    SrcBdryI Γps z i → SrcBdryI (isps-ext d hext) (succ (succ z)) i
+```
+
+## Keep Condition for Target Boundary
+
+`TgtKeep d z i` witnesses that the old variable `z` is not removed when
+extending along the dangling variable `d` at boundary level `i`.
+
+```agda
+data TgtKeep : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+  {Γps : IsPsCtx Γ k} → IsDangling Γps x A n → RawVar Γ → ℕ → Set₁ where
+
+  -- If the new cell lives at a different dimension, no old variable is removed.
+  keep-dim-diff : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} (d : IsDangling Γps x A n) {z i} →
+    n ≢ i → TgtKeep d z i
+
+  -- Even at the same dimension, a variable is kept as long as it is not
+  -- the specific variable consumed by the extension.
+  keep-other-var : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} (d : IsDangling Γps x A n) {z i} →
+    n ≡ i →
+    z ≢ x →
+    TgtKeep d z i
+```
+
+## Proof-Relevant Target Boundary
+
+`TgtBdryI Γps x i` is the target-boundary analogue of `SrcBdryI`. The
+structure mirrors the source boundary with one extra constructor: `tgt-new-y-eq`
+places the newest target variable on the boundary when the extension dimension
+equals `i` exactly, in addition to the strict-less-than case `tgt-new-y-lt`.
+Older variables survive an extension only when `TgtKeep` confirms they are not
+consumed.
+
+```agda
+data TgtBdryI : ∀ {Γ : RawCtx} {k : ℕ} → IsPsCtx Γ k → RawVar Γ → ℕ → Set₁ where
+
+  -- The unique object variable is always on the target boundary.
+  tgt-ob : ∀ {i} → TgtBdryI isps-ob zero i
+
+  -- The newest edge is on the target boundary strictly below the level.
+  tgt-new-f : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {i} →
+    n < i → TgtBdryI (isps-ext d hext) zero i
+
+  -- The newest target is on the target boundary strictly below the level.
+  tgt-new-y-lt : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {i} →
+    n < i → TgtBdryI (isps-ext d hext) (succ zero) i
+
+  -- The newest target is also on the target boundary at the exact level.
+  tgt-new-y-eq : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {i} →
+    n ≡ i → TgtBdryI (isps-ext d hext) (succ zero) i
+
+  -- Older target-boundary variables survive when the keep condition holds.
+  tgt-old : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+    {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {hext : HomTypeExt x A H}
+    (d : IsDangling Γps x A n) {z i} →
+    TgtKeep d z i →
+    TgtBdryI Γps z i →
+    TgtBdryI (isps-ext d hext) (succ (succ z)) i
+```
+
+## Transport Lemmas
+
+These lemmas transport `SrcBdryI` and `TgtBdryI` witnesses along a propositional
+equality `e : Γ ≡ Γ'` between contexts. They are needed when the pasting
+context is reconstructed in a definitionally equal but syntactically different
+form. Both proofs reduce immediately to the identity case.
+
+```agda
 abstract
-  -- Boundary predicates are stable under transport of the ambient context.
-  in-src-bdry-transport :
-    ∀ {Γ Γ'} (e : Γ ≡ Γ') {Γps : CtxPs Γ}
-    → (x : Var Γ')
-    → in-src-bdry (subst CtxPs e Γps) x
-      ≡ in-src-bdry Γps (subst Var (sym e) x)
-  in-src-bdry-transport refl x = refl
+  src-bdry-i-transport : ∀ {Γ Γ' : RawCtx} (e : Γ ≡ Γ') {k : ℕ}
+    {Γps : IsPsCtx Γ k} {x : RawVar Γ} {i} →
+    SrcBdryI Γps x i →
+    SrcBdryI (subst (λ Δ → IsPsCtx Δ k) e Γps) (subst RawVar e x) i
+  src-bdry-i-transport refl p = p
 
-  in-tgt-bdry-transport :
-    ∀ {Γ Γ'} (e : Γ ≡ Γ') {Γps : CtxPs Γ}
-    → (x : Var Γ')
-    → in-tgt-bdry (subst CtxPs e Γps) x
-      ≡ in-tgt-bdry Γps (subst Var (sym e) x)
-  in-tgt-bdry-transport refl x = refl
+  tgt-bdry-i-transport : ∀ {Γ Γ' : RawCtx} (e : Γ ≡ Γ') {k : ℕ}
+    {Γps : IsPsCtx Γ k} {x : RawVar Γ} {i} →
+    TgtBdryI Γps x i →
+    TgtBdryI (subst (λ Δ → IsPsCtx Δ k) e Γps) (subst RawVar e x) i
+  tgt-bdry-i-transport refl p = p
 ```
 
-## Fullness Conditions (COMP and INV)
+## Top-Level Boundary Wrappers
 
-These are the two boundary/dependency patterns that later coherence formation
-cares about. `COMP` says the two endpoints depend on exactly the source and
-target boundaries; `INV` says both depend on everything.
+`SrcBdry` and `TgtBdry` are the boundary predicates used in the fullness
+conditions. They fix the dimension level to `k ∸ 1`, i.e. the top dimension of
+the pasting context, read directly off the `IsPsCtx Γ k` index, so callers do
+not need to compute a dimension.
 
 ```agda
-check-COMP : ∀ {Γ} → CtxPs Γ → Tm Γ → Tm Γ → Bool
-check-COMP {Γ} Γps u v =
-  -- Every variable must match the expected source/target boundary dependency pattern.
-  ∀-var Γ (λ x →
-    let u-has-x = depends-on-var-tm x u
-        v-has-x = depends-on-var-tm x v
-        x-in-src = in-src-bdry Γps x
-        x-in-tgt = in-tgt-bdry Γps x
-    in (u-has-x iff x-in-src) ∧ (v-has-x iff x-in-tgt)
-  )
+SrcBdry : ∀ {Γ : RawCtx} {k : ℕ} → IsPsCtx Γ k → RawVar Γ → Set₁
+SrcBdry {k = k} Γps x = SrcBdryI Γps x (k ∸ 1)
 
-check-INV : ∀ {Γ} → CtxPs Γ → Tm Γ → Tm Γ → Bool
-check-INV {Γ} Γps u v =
-  -- In the invertible case, both terms depend on every variable.
-  ∀-var Γ (λ x → depends-on-var-tm x u ∧ depends-on-var-tm x v)
-
-is-full : ∀ {Γ} → CtxPs Γ → Tm Γ → Tm Γ → Bool
--- Fullness is the disjunction of the COMP and INV patterns.
-is-full Γps u v = (check-COMP Γps u v) ∨ (check-INV Γps u v)
+TgtBdry : ∀ {Γ : RawCtx} {k : ℕ} → IsPsCtx Γ k → RawVar Γ → Set₁
+TgtBdry {k = k} Γps x = TgtBdryI Γps x (k ∸ 1)
 ```
 
-## Source Boundary Coverage Proofs
+## Proof-Relevant Equivalence
 
-The main structural fact needed downstream is that every dimension realized by
-the context is represented somewhere on the source boundary. The proof is by
-induction on the pasting context and splits according to whether the desired
-dimension already appears in the previous stage or must be witnessed by the
-newest cell.
+`A ↔ B` is a record bundling maps in both directions. It is used in the COMP
+fullness record to express that variable dependency and boundary membership are
+in exact correspondence (not just implication in one direction).
 
 ```agda
-abstract
-  -- If a number fits below `suc n` but not below `n`, it must be exactly `suc n`.
-  ≤-not≤-step :
-    ∀ {i n : ℕ}
-    → i ≤ suc n
-    → ¬ (i ≤ n)
-    → i ≡ suc n
-  ≤-not≤-step {zero} {n} i≤ i≰n with i≰n z≤n
-  ... | ()
-  ≤-not≤-step {suc zero} {zero} (s≤s ≤-refl) i≰0 = refl
-  ≤-not≤-step {suc (suc i)} {zero} (s≤s ()) i≰0
-  ≤-not≤-step {suc i} {suc n} (s≤s i≤sn) i≰sn =
-    cong suc (≤-not≤-step i≤sn (λ i≤n → i≰sn (s≤s i≤n)))
+infix 2 _↔_
 
--- Every source boundary at level `i` contains a variable of dimension exactly `i`.
-src-bdry-i-has-dim :
-  ∀ {Γ}
-  → (Γps : CtxPs Γ)
-  → (i : ℕ)
-  → i ≤ dim-ctx Γ
-  → Sum.Σ (Var Γ)
-      (λ z → Sum.Σ (in-src-bdry-i Γps z i ≡ true) (λ _ → dim-var z ≡ i))
-src-bdry-i-has-dim ps-ob zero i≤ = Sum._,_ vz (Sum._,_ refl refl)
-src-bdry-i-has-dim ps-ob (suc i) ()
-src-bdry-i-has-dim (ps-ext {Γ = Γ} {Γps = Γps} xps) i i≤ext
-  with i ≤? dim-ctx Γ | suc (dim-ty (varps-to-type xps)) ≤? dim-ctx Γ
--- If `i` is already realized in the old context, weaken the witness forward twice.
-... | yes i≤Γ | _ =
-  let w = src-bdry-i-has-dim Γps i i≤Γ
-      z = Sum.fst w
-      w' = Sum.snd w
-      zInSrc = Sum.fst w'
-      zDim = Sum.snd w'
-  in Sum._,_ (vs (vs z))
-       (Sum._,_ zInSrc
-         (trans
-           (dim-var-vs (vs z))
-           (trans (dim-var-vs {A = varps-to-type xps} z) zDim)))
--- This branch is impossible: the extension cannot lower the ambient dimension that far.
-... | no i≰Γ | yes sucd≤Γ =
-  ⊥-elim (i≰Γ (≤-trans i≤ext (dim-ctx-ext≤ctx-if-sucd≤ xps sucd≤Γ)))
--- Otherwise the only possible witness is the newest cell variable `f`.
-... | no i≰Γ | no sucd≰Γ =
-  Sum._,_ vz (Sum._,_ src-vz-true dim-vz=i)
+record _↔_ (A B : Set₁) : Set₁ where
+  field
+    to : A → B
+    from : B → A
+
+open _↔_ public
+```
+
+## Fullness: COMP, COMPCOH, Full
+
+`COMP Γps u v` requires that `u` depends on exactly the source-boundary
+variables and `v` on exactly the target-boundary variables. `COMPCOH u v` instead
+requires every variable to appear in both. `Full Γps u v` is the disjunction:
+a coherence is valid when either condition holds.
+
+```agda
+record COMP {Γ : RawCtx} {k : ℕ} (Γps : IsPsCtx Γ k) (u v : RawTm Γ) : Set₁ where
+  -- The source endpoint depends exactly on the source boundary, and the
+  -- target endpoint depends exactly on the target boundary.
+  field
+    src-match : AllVar Γ (λ x → DepVarTm x u ↔ SrcBdry Γps x)
+    tgt-match : AllVar Γ (λ x → DepVarTm x v ↔ TgtBdry Γps x)
+
+open COMP public
+
+COMPCOH : ∀ {Γ : RawCtx} → RawTm Γ → RawTm Γ → Set₁
+-- In the COMPCOH case, every variable occurs in both endpoints.
+COMPCOH {Γ} u v = AllVar Γ (λ x → DepVarTm x u × DepVarTm x v)
+
+-- Relational positivity and endpoint witnesses for inverse coherences. These
+-- replace the computed `dim-ty` / `src` / `tgt` interface, keeping this module
+-- free of the computational companion: `PositiveTy A` records that `A` is at
+-- least 1-dimensional, `AtLeastTwoTy A` that it is at least 2-dimensional, and
+-- `HasEndpoints B s t` extracts the source/target of a hom-type relationally.
+PositiveTy : ∀ {Γ : RawCtx} → RawTy Γ → Set₁
+PositiveTy A = Σ ℕ (λ n → HasDimTy A (suc n))
+
+AtLeastTwoTy : ∀ {Γ : RawCtx} → RawTy Γ → Set₁
+AtLeastTwoTy A = Σ ℕ (λ n → HasDimTy A (suc (suc n)))
+
+data HasEndpoints {Γ : RawCtx} : RawTy Γ → RawTm Γ → RawTm Γ → Set₁ where
+  homEndpoints : ∀ {A : RawTy Γ} {u v : RawTm Γ} → HasEndpoints ([ A ] u ⇒ v) u v
+
+-- Invertible cells reverse the source/target boundary dependency pattern.
+record INV {Γ : RawCtx} {k : ℕ} (Γps : IsPsCtx Γ k) (u v : RawTm Γ) : Set₁ where
+  field
+    tgt-match : AllVar Γ (λ x → DepVarTm x u ↔ TgtBdry Γps x)
+    src-match : AllVar Γ (λ x → DepVarTm x v ↔ SrcBdry Γps x)
+
+-- Negative inverse coherences are based on the source boundary of B. The
+-- endpoints `s` and `t` of `B` are recorded relationally by `endpoints`.
+record INVCOH- {Γ : RawCtx} {k : ℕ} (Γps : IsPsCtx Γ k) (B : RawTy Γ) : Set₁ where
+  field
+    s t : RawTm Γ
+    at-least-two : AtLeastTwoTy B
+    endpoints : HasEndpoints B s t
+    src-match : AllVar Γ (λ x → SrcBdry Γps x ↔ DepVarTm x s)
+    tgt-match : AllVar Γ (λ x → SrcBdry Γps x ↔ DepVarTm x t)
+
+-- Positive inverse coherences are based on the target boundary of B.
+record INVCOH+ {Γ : RawCtx} {k : ℕ} (Γps : IsPsCtx Γ k) (B : RawTy Γ) : Set₁ where
+  field
+    s t : RawTm Γ
+    at-least-two : AtLeastTwoTy B
+    endpoints : HasEndpoints B s t
+    src-match : AllVar Γ (λ x → TgtBdry Γps x ↔ DepVarTm x s)
+    tgt-match : AllVar Γ (λ x → TgtBdry Γps x ↔ DepVarTm x t)
+
+data Full {Γ : RawCtx} {k : ℕ} (Γps : IsPsCtx Γ k) (A : RawTy Γ) (u v : RawTm Γ) : Set₁ where
+  -- Fullness via the compositional boundary pattern.
+  full-COMP : COMP Γps u v → Full Γps A u v
+
+  -- Fullness via the COMPCOH "depends on everything" pattern.
+  full-COMPCOH : COMPCOH u v → Full Γps A u v
+
+  -- Fullness for formally invertible positive-dimensional cells.
+  full-INV : PositiveTy A → INV Γps u v → Full Γps A u v
+
+  -- Fullness for inverse coherences directed toward a source boundary.
+  full-INVCOH- : INVCOH- Γps A → Full Γps A u v
+
+  -- Fullness for inverse coherences directed toward a target boundary.
+  full-INVCOH+ : INVCOH+ Γps A → Full Γps A u v
+```
+
+### On proof-uniqueness of `Full`
+
+Unlike the other relations of the `1-preCaTT` layer, `Full` is **not** a
+proposition: `Full-uip` is false as stated, because `Full` is a genuine sum whose
+cases overlap and whose payloads would need function extensionality. The full
+discussion — including why `Full-uip` must remain postulated in `2a-CaTT` and how
+to remove that dependency via an irrelevant field — is collected with the other
+uniqueness remarks in `1z-Uniqueness`.
+
+## Source Boundary Coverage
+
+`src-bdry-i-has-dim` proves that for any `i ≤ k` the source boundary of an
+`IsPsCtx Γ k` contains at least one variable of dimension exactly `i`, returning
+the dimension as a relational `HasDimVar` witness. The proof proceeds by
+induction on the pasting context: in the base case `isps-ob` only `i = 0` is
+possible; in the extension case `isps-ext d` the argument splits on whether
+`i ≤ k` (recurse into the underlying context) or `i` is the new top dimension
+(the freshest edge variable `zero` is the witness). The extension dimension
+index `(k ⊔ n) ⊔ suc n` is manipulated directly via `isDangling≤ctx`.
+
+```agda
+src-bdry-i-has-dim : ∀ {Γ : RawCtx} {k : ℕ} →
+  (Γps : IsPsCtx Γ k) →
+  (i : ℕ) →
+  i ≤ k →
+  Σ (RawVar Γ) (λ z → SrcBdryI Γps z i × HasDimVar z i)
+src-bdry-i-has-dim isps-ob zeroℕ   _  = zero , src-ob , zeroDim ⋆dim
+src-bdry-i-has-dim isps-ob (suc _) ()
+src-bdry-i-has-dim (isps-ext {Γ = Γ} {k = k} {x = x} {A = A} {n = n} {Γps = Γps} d (hom-type-ext {A' = A'} wA)) i i≤ext
+  with i ≤? k | suc n ≤? k
+-- i is already realized in the underlying context: weaken the witness forward twice.
+... | yes i≤k | _ =
+  let r = src-bdry-i-has-dim Γps i i≤k
+  in succ (succ (proj₁ r))
+     , src-old d (proj₁ (proj₂ r))
+     , succDim (succDim (proj₂ (proj₂ r)))
+-- Impossible: the extension cannot lower the top dimension that far.
+... | no i≰k | yes sucn≤k = ⊥-elim (i≰k (subst (i ≤_) ext≡k i≤ext))
   where
-    -- In the final branch, the ambient dimension is forced to be `suc d`, so
-    -- the newest variable `f` is the only possible witness.
-    d : ℕ
-    d = dim-ty (varps-to-type xps)
+    ext≡k : (k ⊔ n) ⊔ suc n ≡ k
+    ext≡k = trans (cong (_⊔ suc n) (m≥n⇒m⊔n≡m (isDangling≤ctx d)))
+                  (m≥n⇒m⊔n≡m sucn≤k)
+-- The only possible witness is the newest cell variable `f`, of dimension suc n.
+... | no i≰k | no sucn≰k =
+  zero , src-new-f d n<i , subst (HasDimVar zero) (sym i≡sucn) newest-dim
+  where
+    n<i : n < i
+    n<i = ≤-trans (s≤s (isDangling≤ctx d)) (≰⇒> i≰k)
 
-    d≤Γ : d ≤ dim-ctx Γ
-    d≤Γ = dim-varps≤dim-ctx xps
+    k≤sucn : k ≤ suc n
+    k≤sucn = ≰⇒≥ sucn≰k
 
-    Γ≤sucd : dim-ctx Γ ≤ suc d
-    Γ≤sucd = ≰⇒≥ sucd≰Γ
+    ext≡sucn : (k ⊔ n) ⊔ suc n ≡ suc n
+    ext≡sucn = trans (cong (_⊔ suc n) (m≥n⇒m⊔n≡m (isDangling≤ctx d)))
+                     (m≤n⇒m⊔n≡n k≤sucn)
 
-    Γ≤d : dim-ctx Γ ≤ d
-    Γ≤d with dim-ctx Γ ≤? d
-    ... | yes Γ≤d = Γ≤d
-    ... | no Γ≰d = ⊥-elim (sucd≰Γ sucd≤Γ)
-      where
-        Γ≡sucd : dim-ctx Γ ≡ suc d
-        Γ≡sucd = ≤-not≤-step Γ≤sucd Γ≰d
+    i≤sucn : i ≤ suc n
+    i≤sucn = subst (i ≤_) ext≡sucn i≤ext
 
-        sucd≤Γ : suc d ≤ dim-ctx Γ
-        sucd≤Γ rewrite sym Γ≡sucd = ≤-refl
+    i≡sucn : i ≡ suc n
+    i≡sucn = ≤-antisym i≤sucn n<i
 
-    d≡Γ : d ≡ dim-ctx Γ
-    d≡Γ = ≤-antisym d≤Γ Γ≤d
-
-    i≤sucΓ : i ≤ suc (dim-ctx Γ)
-    i≤sucΓ = ≤-trans i≤ext (dim-ctx-ext≤suc xps)
-
-    i≡sucΓ : i ≡ suc (dim-ctx Γ)
-    i≡sucΓ = ≤-not≤-step i≤sucΓ i≰Γ
-
-    i≡sucd : i ≡ suc d
-    i≡sucd = trans i≡sucΓ (sym (cong suc d≡Γ))
-
-    src-vz-true : in-src-bdry-i (ps-ext xps) vz i ≡ true
-    src-vz-true rewrite i≡sucd with d <ᵇ suc d | <⇒<ᵇ (n<1+n d)
-    ... | true  | _  = refl
-    ... | false | ()
-
-    dim-vz-sucd : dim-var {Γ = ext-ctx xps} vz ≡ suc d
-    dim-vz-sucd
-      rewrite dim-ty-wkTy {A = hom-type-ext xps} (hom-type-ext xps)
-            | dim-ty-wkTy {A = varps-to-type xps} (varps-to-type xps)
-      = refl
-
-    dim-vz=i : dim-var {Γ = ext-ctx xps} vz ≡ i
-    dim-vz=i = trans dim-vz-sucd (sym i≡sucd)
-```
-
-## Test Cases
-
-```agda
--- Source boundary ∂⁻(x,y,f) should contain only x
-test-src-arrow-f : in-src-bdry test-arrow vz ≡ false
-test-src-arrow-f = refl
-
-test-src-arrow-y : in-src-bdry test-arrow (vs vz) ≡ false
-test-src-arrow-y = refl
-
-test-src-arrow-x : in-src-bdry test-arrow (vs (vs vz)) ≡ true
-test-src-arrow-x = refl
-
--- Target boundary ∂⁺(x,y,f) should contain only y
-test-tgt-arrow-f : in-tgt-bdry test-arrow vz ≡ false
-test-tgt-arrow-f = refl
-
-test-tgt-arrow-y : in-tgt-bdry test-arrow (vs vz) ≡ true
-test-tgt-arrow-y = refl
-
-test-tgt-arrow-x : in-tgt-bdry test-arrow (vs (vs vz)) ≡ false
-test-tgt-arrow-x = refl
+    newest-dim : HasDimVar (zero {Γ = Γ ▸ A} {A = [ A' ] vs x ⇒ vz}) (suc n)
+    newest-dim = zeroDim (homDim (hasDimTy-wkTy wA (isDangling-hasDimTy d)))
 ```

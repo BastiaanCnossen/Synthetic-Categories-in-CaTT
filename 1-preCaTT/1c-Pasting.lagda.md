@@ -1,24 +1,54 @@
 # 1c-Pasting: Dimensions and Pasting Contexts
 
-This module equips the raw preCaTT syntax with:
-- a dimension function on types, terms, and contexts
-- the inductive notion of a **pasting context**
-- the companion notion of a **dangling variable** inside a pasting context
+This module equips the raw syntax with two closely related notions: dimensions
+and pasting contexts.
 
-A pasting context represents a composable cell-shape. It is built inductively
-from `(x : ⋆)` by repeatedly choosing a dangling variable `x : A` and extending
-the context by:
-- a new target variable `y : A`
-- a new arrow/cell `f : [ A ] x ⇒ y`
+**Dimension** is a numerical measure of the cell-level of a type or variable.
+The type `⋆` has dimension 0; a hom-type `[ A ] t ⇒ u` has dimension
+`1 + dim(A)`. The dimension of a context is the maximum dimension of its
+declared types.
 
-The crucial persistence rule is that previously dangling variables of strictly
-lower dimension remain dangling after extension. This is encoded by the
-`varps-weak` constructor.
+In this version the primary interface is **inductive and relational**:
+
+- `HasDimTy A n` — "the type `A` has dimension `n`",
+- `HasDimCtx Γ n` — "the context `Γ` has dimension `n`",
+- `HasDimVar x n` — "the variable `x` has dimension `n`",
+- `IsPsCtx Γ k` — "`Γ` is a pasting context of dimension `k`",
+- `IsDangling Γps x A n` — "`x : A` is dangling in `Γps`, with dimension `n`".
+
+The natural-number comparisons themselves (`m < n`, `m ≤ n`, `m ≡ n`) remain
+ordinary arithmetic; only the *dimension assignments* are relationalised.
+
+**Pasting contexts** are the composable cell-shapes of CaTT. A pasting context
+is built inductively from the single-object context `(x : ⋆)` by repeatedly
+choosing a **dangling variable** `x : A` and extending the context by:
+- a new target variable `y : A` (same type as `x`), and
+- a new arrow/cell `f : [ A ] x ⇒ y`.
+
+The key rule is that a previously dangling variable of *strictly lower*
+dimension remains dangling after such an extension. This is encoded by the
+`dangling-weak` constructor.
+
+Crucially, this module is now **purely relational**: it imports only the
+relational core `1a-RawSyntax`, never the computational companion. The weakened
+types that appear in pasting extensions (the new cell type `[ wkTy A ] x ⇒ y`,
+and the weakened declared types of the persisting variables) are no longer
+*computed*. Instead the constructors **carry weakening evidence** — `WkTy`,
+`WkTy²`, and the extension-cell relation `HomTypeExt` — recording *which*
+weakened type is used. The legacy computed functions (`dim-ty`, `dim-ctx`,
+`dim-var`, `src`, `tgt`, `desuspend`) are no longer part of the live
+proposition-facing API; callers should use the relational dimension and
+extension witnesses directly.
+
+This module only inspects the `⋆` and `[_]_⇒_` constructors of types,
+and uses `var` and weakening for terms. It does not depend on `coh`.
 
 ```agda
 module 1c-Pasting where
 
-open import Data.Nat using (ℕ; zero; suc; _<_; _≤_; _⊔_; s≤s; z≤n)
+import 1a-RawSyntax as Raw
+open Raw
+open import Data.Nat using (ℕ; suc; _<_; _≤_; _⊔_; s≤s; z≤n) renaming (zero to zeroℕ)
 open import Data.Nat.Properties
   using
     ( ≤-refl
@@ -29,250 +59,264 @@ open import Data.Nat.Properties
     ; m≥n⇒m⊔n≡m
     ; ⊔-lub
     ; n≤1+n
+    ; ≤-irrelevant
     )
-open import Relation.Binary.PropositionalEquality using (_≡_; refl; trans; cong)
-open import 1a-preCaTT
+open import Relation.Binary.PropositionalEquality using (_≡_; refl; trans; cong; cong₂; subst)
 ```
 
-## Dimensions
+## Relational Dimensions
+
+`HasDimTy`, `HasDimCtx`, and `HasDimVar` assign dimensions inductively. A type's
+dimension counts the hom-layers above `⋆`; a context's dimension is the maximum
+over its declared types; a variable's dimension is the dimension of its declared
+type. Because weakening does not change dimension, the variable rules read off
+the dimension of the *unweakened* declared type.
 
 ```agda
--- Dimension of a type
-dim-ty : ∀ {Γ} → Ty Γ → ℕ
-dim-ty ⋆ = zero
-dim-ty ([ A ] t ⇒ u) = suc (dim-ty A)
+data HasDimTy : ∀ {Γ : RawCtx} → RawTy Γ → ℕ → Set₁ where
+  -- dim(⋆) = 0
+  ⋆dim   : ∀ {Γ : RawCtx} → HasDimTy {Γ} ⋆ 0
+  -- dim([ A ] t ⇒ u) = dim(A) + 1
+  homDim : ∀ {Γ : RawCtx} {A : RawTy Γ} {t u : RawTm Γ} {n : ℕ} →
+    HasDimTy A n → HasDimTy ([ A ] t ⇒ u) (suc n)
 
--- Dimension of a term
-dim-tm : ∀ {Γ} → Tm Γ → ℕ
-dim-tm t = dim-ty (tyOf t)
+data HasDimCtx : RawCtx → ℕ → Set₁ where
+  -- dim(◆) = 0
+  ◆dim    : HasDimCtx ◆ 0
+  -- dim(Γ ▸ A) = max(dim(Γ), dim(A))
+  snocDim : ∀ {Γ : RawCtx} {A : RawTy Γ} {n m : ℕ} →
+    HasDimCtx Γ n → HasDimTy A m → HasDimCtx (Γ ▸ A) (n ⊔ m)
 
--- Dimension of a well-typed context
-dim-ctx : Ctx → ℕ
-dim-ctx ∅ = zero
-dim-ctx (Γ , A) = dim-ctx Γ ⊔ dim-ty A
-
--- Weakening does not change dimension.
-dim-ty-wkTy : ∀ {Γ} {A : Ty Γ} (B : Ty Γ) → dim-ty (wkTy {A = A} B) ≡ dim-ty B
-dim-ty-wkTy ⋆ = refl
-dim-ty-wkTy ([ B ] t ⇒ u) = cong suc (dim-ty-wkTy B)
-
--- Substitution preserves type dimension.
-dim-ty-sub : ∀ {Γ Δ} (A : Ty Γ) (σ : Sub Δ Γ) → dim-ty (A [ σ ]T) ≡ dim-ty A
-dim-ty-sub ⋆ σ = refl
-dim-ty-sub ([ A ] t ⇒ u) σ = cong suc (dim-ty-sub A σ)
-
--- Every natural number is strictly smaller than its successor.
-lt-self-suc : (n : ℕ) → n < suc n
-lt-self-suc zero = s≤s z≤n
-lt-self-suc (suc n) = s≤s (lt-self-suc n)
-
-dim-var : ∀ {Γ} → Var Γ → ℕ
--- Variable dimension is just the dimension of its declared type.
-dim-var x = dim-ty (var-to-type x)
-
-dim-var-vs :
-  ∀ {Γ} {A : Ty Γ}
-  → (x : Var Γ)
-  → dim-var {Γ = Γ , A} (vs x) ≡ dim-var x
-dim-var-vs x = dim-ty-wkTy (var-to-type x)
-
-dim-var-vz :
-  ∀ {Γ} {A : Ty Γ}
-  → dim-var {Γ = Γ , A} vz ≡ dim-var (vz {Γ} {A})
-dim-var-vz {Γ} {A} = refl
-
-dim-var≤dim-ctx : ∀ {Γ} (x : Var Γ) → dim-var x ≤ dim-ctx Γ
-dim-var≤dim-ctx {Γ = Γ , A} vz rewrite dim-ty-wkTy {A = A} A =
-  m≤n⊔m (dim-ctx Γ) (dim-ty A)
-dim-var≤dim-ctx {Γ = Γ , A} (vs x) rewrite dim-var-vs {A = A} x =
-  ≤-trans (dim-var≤dim-ctx x) (m≤m⊔n (dim-ctx Γ) (dim-ty A))
+data HasDimVar : ∀ {Γ : RawCtx} → RawVar Γ → ℕ → Set₁ where
+  -- dim(zero : A) = dim(A)
+  zeroDim : ∀ {Γ : RawCtx} {A : RawTy Γ} {n : ℕ} →
+    HasDimTy A n → HasDimVar (zero {Γ = Γ} {A = A}) n
+  -- dim(succ x) = dim(x)   (weakening preserves dimension)
+  succDim : ∀ {Γ : RawCtx} {A : RawTy Γ} {x : RawVar Γ} {n : ℕ} →
+    HasDimVar x n → HasDimVar (succ {A = A} x) n
 ```
+
+Dimension is preserved by weakening and substitution: the proofs are structural
+inductions on the `HasDimTy` witness, consuming the relational `WkTy`/`SubstTy`
+evidence rather than a computed output.
+
+```agda
+hasDimTy-wkTy : ∀ {Γ : RawCtx} {A B : RawTy Γ} {B' : RawTy (Γ ▸ A)} {n : ℕ} →
+  WkTy {A = A} B B' → HasDimTy B n → HasDimTy B' n
+hasDimTy-wkTy wk-⋆             ⋆dim       = ⋆dim
+hasDimTy-wkTy (wk-hom p pt pu) (homDim q) = homDim (hasDimTy-wkTy p q)
+
+hasDimTy-sub : ∀ {Γ Δ : RawCtx} {A : RawTy Γ} {σ : RawSub Δ Γ}
+  {B : RawTy Δ} {n : ℕ} →
+  SubstTy A σ B → HasDimTy A n → HasDimTy B n
+hasDimTy-sub sub-⋆               ⋆dim       = ⋆dim
+hasDimTy-sub (sub-hom p pt pu) (homDim q) = homDim (hasDimTy-sub p q)
+```
+
+Each of these relations also assigns a *unique* numeral to a fixed input; those
+uniqueness proofs are collected in `1z-Uniqueness`, away from the constructions
+that motivate them.
+
+## Extension Witnesses
+
+Two small relations record the weakened types used by a pasting extension,
+without computing them.
+
+`HomTypeExt x A H` says that `H` is the type of the new extension cell over a
+dangling variable `x : A`: it is a hom-type `[ A' ] vs x ⇒ vz` whose base `A'`
+is the weakening of `A` across the freshly bound copy of `A`. The witness stores
+the `WkTy A A'` evidence.
+
+`WkTy² B B''` records two successive weakenings, `WkTy B B'` followed by
+`WkTy B' B''`. It keeps the dangling constructors (which weaken older declared
+types across *two* new binders) readable.
+
+```agda
+data HomTypeExt {Γ : RawCtx} (x : RawVar Γ) (A : RawTy Γ)
+  : RawTy (Γ ▸ A) → Set₁ where
+  hom-type-ext : ∀ {A' : RawTy (Γ ▸ A)}
+    → WkTy {A = A} A A'
+    → HomTypeExt x A ([ A' ] vs x ⇒ vz)
+
+data WkTy² {Γ : RawCtx} {A : RawTy Γ} {C : RawTy (Γ ▸ A)}
+  : RawTy Γ → RawTy ((Γ ▸ A) ▸ C) → Set₁ where
+  wk² : ∀ {B : RawTy Γ} {B' : RawTy (Γ ▸ A)} {B'' : RawTy ((Γ ▸ A) ▸ C)}
+    → WkTy {A = A} B B'
+    → WkTy {A = C} B' B''
+    → WkTy² B B''
+```
+
+Both `HomTypeExt` and `WkTy²` have unique outputs and satisfy UIP; those proofs
+live in `1z-Uniqueness`.
 
 ## Pasting Contexts
 
+`IsPsCtx Γ k` says that `Γ` is a pasting context of dimension `k`, and
+`IsDangling Γps x A n` picks out a dangling variable `x : A` of dimension `n` in
+the pasting context `Γps`. The two families are mutually inductive and carry
+their dimensions as indices, so dimensional side-conditions are stated as plain
+arithmetic on those indices rather than as computations on the raw syntax.
+
+The extension constructor `isps-ext` now carries an explicit extension-cell type
+`H` together with a `HomTypeExt x A H` witness; the extended raw context is then
+the plain syntactic `(Γ ▸ A) ▸ H`. The four dangling constructors are:
+- `dangling-ob` — the unique dangling variable in `(x : ⋆)`,
+- `dangling-f` — the new cell `f` is dangling in any extension; it carries the
+  `WkTy H H'` witness for the weakening of the cell type across its own binder,
+- `dangling-y` — the new target `y` is also dangling; it carries a `WkTy²`
+  witness for the double weakening of `A`,
+- `dangling-weak` — an older dangling variable of strictly smaller dimension
+  persists after extension; it carries a `WkTy²` witness for its weakened type.
+
+The context-dimension index of an extension is written in the *unsimplified*
+form `(k ⊔ n) ⊔ suc n`, matching the two raw context extensions directly.
+
 ```agda
 mutual
-  -- `CtxPs Γ` means "Γ is a pasting context".
-  data CtxPs : Ctx → Set
-  -- `VarPs Γ Γps` means "a chosen dangling variable in the pasting context Γps".
-  data VarPs : (Γ : Ctx) → CtxPs Γ → Set
+  -- `IsPsCtx Γ k` means "Γ is a pasting context of dimension k".
+  data IsPsCtx : RawCtx → ℕ → Set₁
 
-  varps-to-var : ∀ {Γ} {Γps : CtxPs Γ} → VarPs Γ Γps → Var Γ
+  -- `IsDangling Γps x A n` means "x : A is dangling in Γps, of dimension n".
+  data IsDangling :
+    ∀ {Γ : RawCtx} {k : ℕ} → IsPsCtx Γ k → RawVar Γ → RawTy Γ → ℕ → Set₁
 
-  varps-to-type : ∀ {Γ} {Γps : CtxPs Γ} → VarPs Γ Γps → Ty Γ
-  -- A dangling variable determines its ambient type.
-  varps-to-type xps = var-to-type (varps-to-var xps)
-
-  varps-to-tm : ∀ {Γ} {Γps : CtxPs Γ} → VarPs Γ Γps → Tm Γ
-  -- And therefore also a term in the same context.
-  varps-to-tm xps = var (varps-to-var xps)
-
-  hom-type-ext-p-src : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps)
-    → tyOf (var (vs {A = varps-to-type xps} (varps-to-var xps))) ≡ wkTy (varps-to-type xps)
-  hom-type-ext-p-src xps = refl
-
-  hom-type-ext-p-tgt : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps)
-    → tyOf (var (vz {A = varps-to-type xps})) ≡ wkTy (varps-to-type xps)
-  hom-type-ext-p-tgt xps = refl
-
-  hom-type-ext : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps) → Ty (Γ , varps-to-type xps)
-  hom-type-ext xps =
-    [ wkTy (varps-to-type xps) ] var (vs (varps-to-var xps)) ⇒ var vz
-
-  ext-ctx : ∀ {Γ} {Γps : CtxPs Γ} → VarPs Γ Γps → Ctx
-  -- Extend by a new target variable `y : A` and a new cell `f : x ⇒ y`.
-  ext-ctx {Γ} xps =
-    (Γ , varps-to-type xps) , hom-type-ext xps
-
-  varps-to-ctxps : ∀ {Γ} {Γps : CtxPs Γ} → VarPs Γ Γps → CtxPs Γ
-  varps-to-ctxps {_} {Γps} _ = Γps
-
-  data CtxPs where
+  data IsPsCtx where
     -- Base pasting context: a single object.
-    ps-ob  : CtxPs (∅ , ⋆)
-    -- Extend a pasting context along a chosen dangling variable.
-    ps-ext : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps) → CtxPs (ext-ctx xps)
+    isps-ob : IsPsCtx (◆ ▸ ⋆) 0
+    -- Extend a pasting context along a chosen dangling variable, by a new cell
+    -- of type `H` (with `HomTypeExt` evidence).
+    isps-ext : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+      {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} →
+      (d : IsDangling Γps x A n) →
+      HomTypeExt x A H →
+      IsPsCtx ((Γ ▸ A) ▸ H) ((k ⊔ n) ⊔ suc n)
 
-  data VarPs where
+  data IsDangling where
     -- In `(x : ⋆)`, the unique dangling variable is `x`.
-    varps-ob : VarPs (∅ , ⋆) ps-ob
-    -- In an extension, the new cell `f` is dangling.
-    varps-f  : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps) → VarPs (ext-ctx xps) (ps-ext xps)
-    -- The new target `y` is also dangling.
-    varps-y  : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps) → VarPs (ext-ctx xps) (ps-ext xps)
-    -- Older dangling variables persist if their dimension is strictly smaller.
-    varps-weak : ∀ {Γ} {Γps : CtxPs Γ} (xps : VarPs Γ Γps) (zps : VarPs Γ Γps)
-               → dim-ty (varps-to-type zps) < dim-ty (varps-to-type xps)
-               → VarPs (ext-ctx xps) (ps-ext xps)
+    dangling-ob : IsDangling isps-ob zero ⋆ 0
 
-  -- In `(x : ⋆)`, the dangling variable is the top variable.
-  varps-to-var varps-ob = vz
-  -- In an extension, `f` is the newest variable.
-  varps-to-var (varps-f xps) = vz
-  -- The new target `y` sits one step below `f`.
-  varps-to-var (varps-y xps) = vs vz
-  -- A persisted old dangling variable is weakened twice (across `y` and `f`).
-  varps-to-var (varps-weak xps zps _) = vs (vs (varps-to-var zps))
+    -- In an extension, the new cell `f` is dangling, one dimension higher. Its
+    -- type is the weakening `H'` of the cell type `H` across its own binder.
+    dangling-f : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+      {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {H' : RawTy ((Γ ▸ A) ▸ H)} →
+      (d : IsDangling Γps x A n) →
+      (hext : HomTypeExt x A H) →
+      WkTy {A = H} H H' →
+      IsDangling (isps-ext d hext) zero H' (suc n)
+
+    -- The new target `y` is also dangling, at the same dimension as `x`. Its
+    -- type is `A` weakened across the two new binders.
+    dangling-y : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+      {Γps : IsPsCtx Γ k} {H : RawTy (Γ ▸ A)} {A'' : RawTy ((Γ ▸ A) ▸ H)} →
+      (d : IsDangling Γps x A n) →
+      (hext : HomTypeExt x A H) →
+      WkTy² {A = A} {C = H} A A'' →
+      IsDangling (isps-ext d hext) (succ zero) A'' n
+
+    -- Older dangling variables persist if their dimension is strictly smaller;
+    -- their type is weakened across the two new binders.
+    dangling-weak : ∀ {Γ : RawCtx} {k : ℕ} {x : RawVar Γ} {A : RawTy Γ} {n : ℕ}
+      {z : RawVar Γ} {B : RawTy Γ} {m : ℕ} {Γps : IsPsCtx Γ k}
+      {H : RawTy (Γ ▸ A)} {B'' : RawTy ((Γ ▸ A) ▸ H)} →
+      (d : IsDangling Γps x A n) →
+      (e : IsDangling Γps z B m) →
+      (hext : HomTypeExt x A H) →
+      WkTy² {A = A} {C = H} B B'' →
+      m < n →
+      IsDangling (isps-ext d hext) (succ (succ z)) B'' m
 ```
 
-## Pasting Dimension Helpers
+## Positive Structural Lemmas
+
+These lemmas read typing and dimension data directly off an `IsDangling` /
+`IsPsCtx` witness, by induction on its constructors. They consume the weakening
+evidence stored in the constructors directly, never recomputing it.
+
+First: a dangling variable is well-typed at its recorded type.
 
 ```agda
--- Every dangling variable lives within the ambient context dimension.
-dim-varps≤dim-ctx :
-  ∀ {Γ} {Γps : CtxPs Γ}
-  → (xps : VarPs Γ Γps)
-  → dim-ty (varps-to-type xps) ≤ dim-ctx Γ
-dim-varps≤dim-ctx xps = dim-var≤dim-ctx (varps-to-var xps)
-
--- Extending along a dangling variable can raise context dimension by at most one.
-dim-ctx-ext≤suc :
-  ∀ {Γ} {Γps : CtxPs Γ}
-  → (xps : VarPs Γ Γps)
-  → dim-ctx (ext-ctx xps) ≤ suc (dim-ctx Γ)
-dim-ctx-ext≤suc {Γ} {Γps} xps with dim-varps≤dim-ctx xps
-... | d≤Γ
-  rewrite m≥n⇒m⊔n≡m d≤Γ
-        | dim-ty-wkTy {A = varps-to-type xps} (varps-to-type xps) =
-  ⊔-lub (n≤1+n (dim-ctx Γ)) (s≤s d≤Γ)
-
--- If the new cell dimension already fits inside Γ, the extension does not increase dimension at all.
-dim-ctx-ext≤ctx-if-sucd≤ :
-  ∀ {Γ} {Γps : CtxPs Γ}
-  → (xps : VarPs Γ Γps)
-  → suc (dim-ty (varps-to-type xps)) ≤ dim-ctx Γ
-  → dim-ctx (ext-ctx xps) ≤ dim-ctx Γ
-dim-ctx-ext≤ctx-if-sucd≤ {Γ} {Γps} xps sucd≤Γ with dim-varps≤dim-ctx xps
-... | d≤Γ
-  rewrite m≥n⇒m⊔n≡m d≤Γ
-        | dim-ty-wkTy {A = varps-to-type xps} (varps-to-type xps) =
-  ⊔-lub ≤-refl sucd≤Γ
-
--- The new target `y` has the same dimension as the old dangling variable it copies.
-dim-varps-y :
-  ∀ {Γ} {Γps : CtxPs Γ} (d : VarPs Γ Γps)
-  → dim-ty (varps-to-type (varps-y d)) ≡ dim-ty (varps-to-type d)
-dim-varps-y d =
-  trans (dim-ty-wkTy (wkTy (varps-to-type d)))
-    (dim-ty-wkTy (varps-to-type d))
-
--- Weakening an older dangling witness preserves its original dimension.
-dim-varps-weak :
-  ∀ {Γ} {Γps : CtxPs Γ}
-  (xps zps : VarPs Γ Γps)
-  (lt : dim-ty (varps-to-type zps) < dim-ty (varps-to-type xps))
-  → dim-ty (varps-to-type (varps-weak xps zps lt))
-    ≡ dim-ty (varps-to-type zps)
-dim-varps-weak xps zps lt =
-  trans (dim-ty-wkTy (wkTy (varps-to-type zps)))
-    (dim-ty-wkTy (varps-to-type zps))
-
--- The new cell `f` sits exactly one dimension above its source/target type.
-dim-varps-f :
-  ∀ {Γ} {Γps : CtxPs Γ} (d : VarPs Γ Γps)
-  → dim-ty (varps-to-type (varps-f d)) ≡ suc (dim-ty (varps-to-type d))
-dim-varps-f d =
-  trans (dim-ty-wkTy (hom-type-ext d))
-    (cong suc (dim-ty-wkTy (varps-to-type d)))
-
--- In every extension, the target witness lies strictly below the new cell witness.
-lt-varps-y-varps-f :
-  ∀ {Γ} {Γps : CtxPs Γ} (d : VarPs Γ Γps)
-  → dim-ty (varps-to-type (varps-y d)) < dim-ty (varps-to-type (varps-f d))
-lt-varps-y-varps-f d rewrite dim-varps-y d =
-  lt-self-suc (dim-ty (varps-to-type d))
-
--- The same strict inequality for the original dangling variable itself.
-lt-varps-to-f :
-  ∀ {Γ} {Γps : CtxPs Γ} (d : VarPs Γ Γps)
-  → dim-ty (varps-to-type d) < dim-ty (varps-to-type (varps-f d))
-lt-varps-to-f d rewrite dim-varps-f d = lt-self-suc (dim-ty (varps-to-type d))
+isDangling-hasTyVar : ∀ {Γ : RawCtx} {k : ℕ} {Γps : IsPsCtx Γ k}
+  {x : RawVar Γ} {A : RawTy Γ} {n : ℕ} →
+  IsDangling Γps x A n → HasTyVar x A
+isDangling-hasTyVar dangling-ob                       = zeroTy wk-⋆
+isDangling-hasTyVar (dangling-f d hext w)             = zeroTy w
+isDangling-hasTyVar (dangling-y d hext (wk² wa wh))   = succTy (zeroTy wa) wh
+isDangling-hasTyVar (dangling-weak d e hext (wk² wa wh) _) =
+  succTy (succTy (isDangling-hasTyVar e) wa) wh
 ```
 
-## Test Cases
+Next: a dangling variable's recorded type has its recorded dimension, and hence
+so does the variable.
 
 ```agda
--- Test 1: (x : ⋆) is a pasting context
-test-ob : CtxPs (∅ , ⋆)
-test-ob = ps-ob
+isDangling-hasDimTy : ∀ {Γ : RawCtx} {k : ℕ} {Γps : IsPsCtx Γ k}
+  {x : RawVar Γ} {A : RawTy Γ} {n : ℕ} →
+  IsDangling Γps x A n → HasDimTy A n
+isDangling-hasDimTy dangling-ob = ⋆dim
+isDangling-hasDimTy (dangling-f d (hom-type-ext wA) w) =
+  hasDimTy-wkTy w (homDim (hasDimTy-wkTy wA (isDangling-hasDimTy d)))
+isDangling-hasDimTy (dangling-y d hext (wk² wa wh)) =
+  hasDimTy-wkTy wh (hasDimTy-wkTy wa (isDangling-hasDimTy d))
+isDangling-hasDimTy (dangling-weak d e hext (wk² wa wh) _) =
+  hasDimTy-wkTy wh (hasDimTy-wkTy wa (isDangling-hasDimTy e))
 
--- Test 2: (x : ⋆, y : ⋆, f : x ⇒ y) is a pasting context
-test-arrow : CtxPs _
-test-arrow = ps-ext varps-ob
-
--- Test 3: Composable arrows (x : ⋆, y : ⋆, f : x ⇒ y, z : ⋆, g : y ⇒ z)
-test-comp : CtxPs _
-test-comp = ps-ext (varps-y varps-ob)
-
--- Test 4: In test-comp, the variable g is dangling
-test-comp-g : VarPs _ test-comp
-test-comp-g = varps-f (varps-y varps-ob)
-
--- Test 5: In test-comp, the variable z is also dangling
-test-comp-z : VarPs _ test-comp
-test-comp-z = varps-y (varps-y varps-ob)
-
--- Test 6: 2-cell context (x, y, f, g, α)
-test-2cell : CtxPs _
-test-2cell = ps-ext (varps-f varps-ob)
-
--- Test 7: In test-2cell, y is still dangling via varps-weak
-test-2cell-y : VarPs _ test-2cell
-test-2cell-y = varps-weak (varps-f varps-ob) (varps-y varps-ob) (s≤s z≤n)
-
--- Test 8: 3-cell context (x, y, f, g, α, h, β)
-test-3cell : CtxPs _
-test-3cell = ps-ext (varps-f (varps-f varps-ob))
-
--- Test 9: In test-3cell, y is still dangling (dim 0 < dim 2)
-test-3cell-y : VarPs _ test-3cell
-test-3cell-y = varps-weak (varps-f (varps-f varps-ob))
-                          (varps-weak (varps-f varps-ob) (varps-y varps-ob) (s≤s z≤n))
-                          (s≤s z≤n)
-
--- Test 10: In test-3cell, h is also dangling (dim 1 < dim 2)
-test-3cell-h : VarPs _ test-3cell
-test-3cell-h = varps-weak (varps-f (varps-f varps-ob))
-                          (varps-y (varps-f varps-ob))
-                          (s≤s (s≤s z≤n))
+isDangling-hasDimVar : ∀ {Γ : RawCtx} {k : ℕ} {Γps : IsPsCtx Γ k}
+  {x : RawVar Γ} {A : RawTy Γ} {n : ℕ} →
+  IsDangling Γps x A n → HasDimVar x n
+isDangling-hasDimVar dangling-ob = zeroDim ⋆dim
+isDangling-hasDimVar (dangling-f d (hom-type-ext wA) w) =
+  zeroDim (homDim (hasDimTy-wkTy wA (isDangling-hasDimTy d)))
+isDangling-hasDimVar (dangling-y d hext w2)       = succDim (zeroDim (isDangling-hasDimTy d))
+isDangling-hasDimVar (dangling-weak d e hext w2 _) = succDim (succDim (isDangling-hasDimVar e))
 ```
+
+A pasting context has its recorded dimension. The extension case extends the
+underlying `HasDimCtx` twice: once by the dangling type `A : n`, then by the new
+cell type `H : suc n`.
+
+```agda
+isPsCtx-hasDimCtx : ∀ {Γ : RawCtx} {k : ℕ} → IsPsCtx Γ k → HasDimCtx Γ k
+isPsCtx-hasDimCtx isps-ob = snocDim ◆dim ⋆dim
+isPsCtx-hasDimCtx (isps-ext {Γps = Γps} d (hom-type-ext wA)) =
+  snocDim (snocDim (isPsCtx-hasDimCtx Γps) (isDangling-hasDimTy d))
+          (homDim (hasDimTy-wkTy wA (isDangling-hasDimTy d)))
+```
+
+Every dangling variable lives within the ambient context dimension. This is the
+relational replacement for the old `dim-varps≤dim-ctx`.
+
+```agda
+isDangling≤ctx : ∀ {Γ : RawCtx} {k : ℕ} {Γps : IsPsCtx Γ k}
+  {x : RawVar Γ} {A : RawTy Γ} {n : ℕ} →
+  IsDangling {k = k} Γps x A n → n ≤ k
+isDangling≤ctx dangling-ob                = z≤n
+isDangling≤ctx (dangling-f {k = k} {n = n} d hext w) =
+  m≤n⊔m (k ⊔ n) (suc n)
+isDangling≤ctx (dangling-y {k = k} {n = n} d hext w2) =
+  ≤-trans (n≤1+n n) (m≤n⊔m (k ⊔ n) (suc n))
+isDangling≤ctx (dangling-weak {k = k} {n = n} d e hext w2 _) =
+  ≤-trans (≤-trans (isDangling≤ctx e) (m≤m⊔n k n)) (m≤m⊔n (k ⊔ n) (suc n))
+```
+
+## Legacy `CtxPs` / `VarPs` Surface (intentionally omitted)
+
+The pre-migration code exposed an unindexed `CtxPs Γ` / `VarPs Γ Γps` core with
+projections `varps-to-var`, `varps-to-type`, `varps-to-tm`. A faithful
+compatibility shim would have to bundle the new indexed witnesses (`x`, `A`,
+`n`, `d : IsDangling …`) and reproduce the old definitional behaviour of the
+pasting extension, which contorts the relational core for no benefit on this
+pass. Downstream modules should consume `IsPsCtx` / `IsDangling` directly. When
+a computed constructor still needs endpoint typing, keep that small bridge local
+to the constructor rather than rebuilding a broad computed pasting API.
+
+## Uniqueness and Proof Uniqueness
+
+The relations of this module are *functional* in their numeric/type outputs (a
+fixed input determines the result) and *proof-irrelevant* (any two witnesses of
+the same statement are equal). The corresponding `*-unique` / `*-uip` proofs —
+for dimensions (`hasDimTy-unique`, `hasDimCtx-unique`, `hasDimVar-unique`), the
+extension witnesses (`homTypeExt-unique`, `HomTypeExt-uip`, `wkTy²-unique`,
+`WkTy²-uip`), and the pasting families (`isPsCtx-dim-unique`,
+`isDangling-ty-unique`, `isDangling-dim-unique`, `IsDangling-uip`,
+`IsPsCtx-uip`) — now live in `1z-Uniqueness`, alongside the analogous raw-syntax
+results from `1a-RawSyntax`.
