@@ -1,0 +1,9 @@
+name: catt-synthetic
+include: .
+         I-CaTT/1-preCaTT
+         I-CaTT/2-CaTT
+         I-CaTT/3-Naturality
+         I-CaTT/4-Diagrams
+         I-CaTT/5-Universality
+         II-Categories
+depend: standard-library
